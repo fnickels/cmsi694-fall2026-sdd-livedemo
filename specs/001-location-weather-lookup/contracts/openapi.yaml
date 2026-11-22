@@ -1,0 +1,160 @@
+openapi: 3.1.0
+info:
+  title: Location Weather Lookup API
+  version: 1.0.0
+  description: >
+    Backend API for the weather web app. All responses are JSON. All measurements are
+    metric. Errors always use the Error schema. Every response includes an
+    `x-request-id` header (echoed if supplied by the client).
+security: []  # Public, anonymous API by design (spec FR-014)
+servers:
+  - url: http://localhost:3000
+paths:
+  /api/health:
+    get:
+      operationId: getHealth
+      summary: Liveness check
+      responses:
+        '200':
+          description: Service is up
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [status]
+                properties:
+                  status: { const: ok }
+  /api/locations/search:
+    get:
+      operationId: searchLocations
+      summary: Resolve free-text input (city, "city, region", postal code) to candidates
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema: { type: string, minLength: 1, maxLength: 100 }
+          description: Trimmed by the server; whitespace-only is rejected.
+      responses:
+        '200':
+          description: 1–5 candidates, best match first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [results]
+                properties:
+                  results:
+                    type: array
+                    minItems: 1
+                    maxItems: 5
+                    items: { $ref: '#/components/schemas/Location' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '503': { $ref: '#/components/responses/UpstreamUnavailable' }
+  /api/locations/reverse:
+    get:
+      operationId: reverseGeocode
+      summary: Resolve device coordinates to a place ("use my location")
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number, minimum: -90, maximum: 90 } }
+        - { name: lon, in: query, required: true, schema: { type: number, minimum: -180, maximum: 180 } }
+      responses:
+        '200':
+          description: >
+            Resolved place with coordinates rounded to 2 decimals. If the place name
+            cannot be determined, name is "Current location" and region/country are null.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [location]
+                properties:
+                  location: { $ref: '#/components/schemas/Location' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+  /api/weather:
+    get:
+      operationId: getWeather
+      summary: Current weather facts for a location (cached up to 90 seconds)
+      parameters:
+        - { name: lat, in: query, required: true, schema: { type: number, minimum: -90, maximum: 90 } }
+        - { name: lon, in: query, required: true, schema: { type: number, minimum: -180, maximum: 180 } }
+        - name: name
+          in: query
+          required: false
+          schema: { type: string, maxLength: 100 }
+          description: Display name to echo in the report (optional).
+      responses:
+        '200':
+          description: Weather report
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/WeatherReport' }
+        '400': { $ref: '#/components/responses/ValidationError' }
+        '503': { $ref: '#/components/responses/UpstreamUnavailable' }
+components:
+  schemas:
+    Location:
+      type: object
+      required: [id, name, region, country, latitude, longitude, timezone]
+      properties:
+        id: { type: string }
+        name: { type: string, minLength: 1, maxLength: 100 }
+        region: { type: [string, 'null'] }
+        country: { type: [string, 'null'] }
+        latitude: { type: number, minimum: -90, maximum: 90 }
+        longitude: { type: number, minimum: -180, maximum: 180 }
+        timezone: { type: string }
+    NullableNumber:
+      type: [number, 'null']
+    WeatherReport:
+      type: object
+      required:
+        [location, observedAt, fetchedAt, isDay, condition, temperatureC, feelsLikeC,
+         humidityPct, windSpeedKmh, windDirectionDeg, highC, lowC, sunrise, sunset,
+         uvIndex, pressureHpa, visibilityM, precipitationChancePct]
+      properties:
+        location: { $ref: '#/components/schemas/Location' }
+        observedAt: { type: string, format: date-time }
+        fetchedAt: { type: string, format: date-time }
+        isDay: { type: boolean }
+        condition:
+          type: object
+          required: [code, description, icon, category]
+          properties:
+            code: { type: integer }
+            description: { type: string }
+            icon: { type: string }
+            category: { enum: [clear, cloudy, fog, rain, snow, storm, neutral] }
+        temperatureC: { $ref: '#/components/schemas/NullableNumber' }
+        feelsLikeC: { $ref: '#/components/schemas/NullableNumber' }
+        humidityPct: { $ref: '#/components/schemas/NullableNumber' }
+        windSpeedKmh: { $ref: '#/components/schemas/NullableNumber' }
+        windDirectionDeg: { $ref: '#/components/schemas/NullableNumber' }
+        highC: { $ref: '#/components/schemas/NullableNumber' }
+        lowC: { $ref: '#/components/schemas/NullableNumber' }
+        sunrise: { type: [string, 'null'] }
+        sunset: { type: [string, 'null'] }
+        uvIndex: { $ref: '#/components/schemas/NullableNumber' }
+        pressureHpa: { $ref: '#/components/schemas/NullableNumber' }
+        visibilityM: { $ref: '#/components/schemas/NullableNumber' }
+        precipitationChancePct: { $ref: '#/components/schemas/NullableNumber' }
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { enum: [VALIDATION_ERROR, NOT_FOUND, UPSTREAM_UNAVAILABLE, INTERNAL_ERROR] }
+            message: { type: string, description: 'User-safe, actionable text' }
+  responses:
+    ValidationError:
+      description: Input missing, empty, too long, or out of range
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    NotFound:
+      description: No location matched the input
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
+    UpstreamUnavailable:
+      description: Weather/geocoding provider failed or timed out (5 s)
+      content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } }
